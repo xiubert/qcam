@@ -6,6 +6,8 @@ import joblib
 import os
 from glob import glob
 import re
+import math
+import warnings
 
 from holoviews import opts, streams
 import holoviews as hv
@@ -194,6 +196,125 @@ def getEdgeXYdisp(imgSeries: np.ndarray, mask: np.ndarray, frameDiff: int) -> tu
     return Xdisp, Ydisp, meanX, medianX, meanY, medianY
 
 
+def polygon2mask(points: list, image_shape: tuple = (130, 174), **kwargs):
+    """
+    Create a binary mask from polygon coordinates.
+
+    This function generates a 2D binary mask by mapping a user-defined polygon onto an image grid.
+    It determines which pixels fall inside the polygon and assigns them a value of `True` (1), 
+    while the rest remain `False` (0). 
+
+    Args:
+        points (list): List containing coordinates of polygon vertices in tuple format (X, Y).
+        image_shape (tuple, optional): Shape of the output binary mask as (height, width) or (Y, X). 
+                                       Same as that of the image.
+        **kwargs: Optional keyword arguments that can override `image_shape`.
+
+    Returns:
+        mask (numpy array): A 2D binary mask where pixels inside the polygon are `True`, 
+                            and all other pixels are `False`.
+    """
+    
+    # Optionally override parameters using kwargs
+    image_shape = kwargs.get('image_shape', image_shape)
+
+    # Check if any points exceed the image boundary
+    for x, y in points:
+        if x < 0 or x > image_shape[1] or y < 0 or y > image_shape[0]:
+            warnings.warn(f"Point({x}, {y}) is out of bounds for image shape {image_shape}.")
+
+    # Create empty binary mask
+    mask = np.zeros(image_shape, dtype=bool)
+
+    # Create a mesh grid of image coordinates
+    y, x = np.mgrid[:image_shape[0], :image_shape[1]]
+
+    # Combine coordinates into a flattened (N, 2) array
+    coords = np.vstack((x.ravel(), y.ravel())).T
+
+    # Create path object from polygon points
+    path = Path(points)
+
+    # Check which points are inside the polygon
+    mask_flat = path.contains_points(coords)
+    mask = mask_flat.reshape(image_shape)
+
+    return mask
+
+
+def getSquareMask(Xcoor: float, Ycoor: float, width: float, height: float, 
+                 angle: float = 90, X_parallel : bool = True, **kwargs):
+    """
+    Manually generate a binary mask for a square- or parallelogram-shaped region of interest (ROI).
+
+    This function creates a binary mask for a square or parallelogram with specified width, height, and an 
+    adjustable angle. At least one pair of opposite sides should be parallel to either the X-axis or the Y-axis.
+    The mask can be used to isolate specific regions within an image.
+
+    Args:
+        Xcoor (float): X-coordinate of the top-left vertex.
+        Ycoor (float): Y-coordinate of the top-left vertex.
+        width (float): Distance between left and right sides. Must be > 0.
+        height (float): Distance between top and bottom sides. Must be > 0.
+        angle (float, optional): Angle (in degrees) of the top-left vertex. Should be within range 0 to 180.
+                                 Defaults to 90 degrees (creates a rectangle).
+        X_parallel (bool, optional): Whether the parallelogram is aligned with the X-axis or Y-axis.
+                                    - `True`: The top and bottom sides are parallel to the X-axis.
+                                    - `False`: The left and right sides are parallel to the Y-axis.
+                                    Defaults to `True`.
+        **kwargs: Optional keyword arguments.
+
+    Returns:
+        mask_output (dict): A dictionary containing:
+                            - `'mask'`: A 2D binary mask representing the parallelogram.
+                            - `'ROIcontour'`: A NumPy array of the parallelogram's vertex coordinates, 
+                                              including a repeated first vertex to close the shape.
+
+    Notes:
+        - The parallelogram is defined by four vertices, calculated using trigonometric functions.
+        - The function internally calls `polygon2mask` to create the binary mask.
+        - The contour array (`ROIcontour`) ensures the shape is closed by repeating the first vertex.
+    """
+    
+    if width > 0 and height > 0:
+        # Calculate vertex coordinates based on width, height, and angle
+        if 0 < angle < 180:
+            if X_parallel:
+                # If the top and bottom sides are parallel to the X-axis
+                shift_x = height/math.tan(math.radians(angle))
+                points = [(Xcoor, Ycoor),
+                          (Xcoor + width, Ycoor),
+                          (Xcoor + width + shift_x, Ycoor + height),
+                          (Xcoor + shift_x, Ycoor + height)]
+            else:
+                # If the left and right sides are parallel to the Y-axis
+                shift_y = width/math.tan(math.radians(angle))
+                points = [(Xcoor, Ycoor),
+                          (Xcoor + width, Ycoor + shift_y),
+                          (Xcoor + width, Ycoor + height + shift_y),
+                          (Xcoor, Ycoor + height)]
+        else:
+            # Raise error for invalid angle degrees
+            raise ValueError("`angle` must be between 0 and 180 degrees.")
+    else:
+        # Raise error for negative values of width or height
+        raise ValueError("`width` and `height` must be positive values.")
+    
+    # Create binary mask from vertex coordinates
+    mask = polygon2mask(points, **kwargs)
+
+    # Convert the polygon vertices into a NumPy array
+    contour = np.array(points)
+
+    # Close the polygon by adding the first point at the end
+    contour = np.vstack([contour, contour[0,:]])
+
+    # Store mask and contour data in a dictionary
+    mask_output = {'mask': mask, 'ROIcontour': contour}
+
+    return mask_output
+
+
 def getROImaskUI(image: np.ndarray, show_mask: bool = True, 
                  expDir: str = None, saveName: str = "response_mask", 
                  **kwargs):
@@ -264,24 +385,6 @@ def getROImaskUI(image: np.ndarray, show_mask: bool = True,
     # for running in jupyter notebook
     pn.extension()
     hv.extension('bokeh')
-    def polygon2mask(points, image_shape):
-        """Create a binary mask from polygon coordinates."""
-        mask = np.zeros(image_shape, dtype=bool)
-
-        # Create a mesh grid of image coordinates
-        y, x = np.mgrid[:image_shape[0], :image_shape[1]]
-
-        # Combine coordinates into a flattened (N, 2) array
-        coords = np.vstack((x.ravel(), y.ravel())).T
-
-        # Create path object
-        path = Path(points)
-
-        # Check which points are inside the polygon
-        mask_flat = path.contains_points(coords)
-        mask = mask_flat.reshape(image_shape)
-
-        return mask
 
     # Initialize Holoviews objects
     image_hv = hv.Image(image, bounds=(0, 0, image.shape[1], image.shape[0])).opts(
@@ -313,7 +416,7 @@ def getROImaskUI(image: np.ndarray, show_mask: bool = True,
            
 
             # Create and display mask
-            mask = polygon2mask(points, image.shape)
+            mask = polygon2mask(points, image_shape=image.shape)
             
             # debug
             # print("Poly Stream Data:", poly_stream.data)
